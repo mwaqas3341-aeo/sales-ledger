@@ -6,6 +6,7 @@ let state = {
   session: null,
   profile: null,
   shop: null,
+  billing: null,
   view: null,
 };
 
@@ -52,8 +53,16 @@ async function loadProfileAndShop() {
       .eq("id", profile.shop_id)
       .single();
     state.shop = shop || null;
+
+    const { data: billing } = await supabase
+      .from("shop_billing_status")
+      .select("*")
+      .eq("shop_id", profile.shop_id)
+      .single();
+    state.billing = billing || null;
   } else {
     state.shop = null;
+    state.billing = null;
   }
 }
 
@@ -186,6 +195,7 @@ function renderAppShell() {
       ["stock", "Stock in / out"],
       ["staff", "Staff"],
       ["logs", "Transaction logs"],
+      ["billing", "Billing"],
     ],
     salesman: [
       ["search", "Search stock"],
@@ -214,8 +224,9 @@ function renderAppShell() {
       <div class="main">
         <div class="topbar">
           <h1 id="page-title"></h1>
-          ${state.shop ? `<span class="tier-chip ${state.shop.account_tier}">${state.shop.account_tier}</span>` : ""}
+          ${renderBillingChip()}
         </div>
+        ${renderBillingBanner()}
         <div id="view-slot"></div>
       </div>
     </div>
@@ -228,12 +239,109 @@ function renderAppShell() {
       renderAppShell();
     };
   });
+  const gotoBilling = root.querySelector("[data-goto-billing]");
+  if (gotoBilling) {
+    gotoBilling.onclick = (e) => {
+      e.preventDefault();
+      state.view = "billing";
+      renderAppShell();
+    };
+  }
 
   renderView();
 }
 
 function setTitle(t) {
   document.getElementById("page-title").textContent = t;
+}
+
+function daysLeft(dateStr) {
+  if (!dateStr) return null;
+  const ms = new Date(dateStr).getTime() - Date.now();
+  return Math.ceil(ms / (1000 * 60 * 60 * 24));
+}
+
+function renderBillingChip() {
+  const b = state.billing;
+  if (!b) return "";
+  if (b.subscription_status === "active" && b.is_active) {
+    return `<span class="tier-chip paid">Paid · renews in ${daysLeft(b.current_period_end)}d</span>`;
+  }
+  if (b.subscription_status === "trialing" && b.is_active) {
+    return `<span class="tier-chip free">Trial · ${daysLeft(b.trial_ends_at)}d left</span>`;
+  }
+  return `<span class="tier-chip free" style="background:var(--rust-soft);color:var(--rust)">Expired</span>`;
+}
+
+function renderBillingBanner() {
+  const b = state.billing;
+  if (!b || b.is_active) return "";
+  const msg = b.subscription_status === "trialing" || b.subscription_status === "expired"
+    ? "Your 7-day trial has ended."
+    : "Your subscription payment is overdue.";
+  return `<div class="msg error" style="margin-bottom:20px">
+    ${msg} Inventory and staff changes are paused until you renew.
+    ${state.profile.role === "owner" ? ` <a href="#" data-goto-billing style="color:inherit;text-decoration:underline">Go to Billing →</a>` : " Ask your shop owner to renew."}
+  </div>`;
+}
+
+async function renderOwnerBilling(slot) {
+  setTitle("Billing");
+  const b = state.billing;
+  slot.innerHTML = `
+    <div class="card">
+      <h2>Plan</h2>
+      <div class="ledger-row">
+        <span class="name">${escapeHtml(b.shop_name)}</span>
+        <span class="filler"></span>
+        <span class="value">Rs. ${Number(b.monthly_price_pkr).toFixed(0)} / month</span>
+      </div>
+      <div class="ledger-row">
+        <span class="name">Status</span>
+        <span class="filler"></span>
+        <span class="value">${b.subscription_status}${b.is_active ? "" : " (inactive)"}</span>
+      </div>
+      ${b.subscription_status === "trialing" ? `
+        <div class="ledger-row">
+          <span class="name">Trial ends</span>
+          <span class="filler"></span>
+          <span class="value">${new Date(b.trial_ends_at).toLocaleDateString()} (${daysLeft(b.trial_ends_at)} day(s) left)</span>
+        </div>` : ""}
+      ${b.current_period_end ? `
+        <div class="ledger-row">
+          <span class="name">Paid through</span>
+          <span class="filler"></span>
+          <span class="value">${new Date(b.current_period_end).toLocaleDateString()}</span>
+        </div>` : ""}
+    </div>
+    <div class="card">
+      <h2>Renew / upgrade — Rs. ${Number(b.monthly_price_pkr).toFixed(0)}</h2>
+      <p class="sub">You'll be redirected to a secure hosted checkout page. Your card or wallet details never touch this app.</p>
+      <div id="renew-msg"></div>
+      <button class="btn btn-primary" id="renew-btn">Pay & renew 30 days</button>
+    </div>
+  `;
+
+  document.getElementById("renew-btn").onclick = async () => {
+    const msgSlot = document.getElementById("renew-msg");
+    msgSlot.innerHTML = `<div class="msg success">Redirecting to checkout…</div>`;
+    // This calls a Supabase Edge Function you deploy separately (e.g. "create-payment")
+    // which talks to your chosen gateway (Safepay / PayFast PK / PayPro) and returns
+    // a hosted checkout URL. See README "Billing / payments" section for the contract.
+    try {
+      const { data, error } = await supabase.functions.invoke("create-payment", {
+        body: { shop_id: state.shop.id },
+      });
+      if (error) throw error;
+      if (data?.checkout_url) {
+        window.location.href = data.checkout_url;
+      } else {
+        throw new Error("No checkout URL returned — is the create-payment function deployed?");
+      }
+    } catch (err) {
+      msgSlot.innerHTML = `<div class="msg error">${escapeHtml(err.message)}</div>`;
+    }
+  };
 }
 
 function renderView() {
@@ -254,6 +362,7 @@ function renderView() {
     if (state.view === "stock") return renderStockForm(slot, true);
     if (state.view === "staff") return renderOwnerStaff(slot);
     if (state.view === "logs") return renderOwnerLogs(slot);
+    if (state.view === "billing") return renderOwnerBilling(slot);
   }
   if (role === "salesman") {
     if (!state.shop) {
