@@ -54,6 +54,61 @@ Then in the repo: **Settings → Pages → Source → Deploy from a branch →
    Staff screen (limited to 3 on Free, 10 on Paid — enforced both in the UI
    and by a database trigger).
 
+## Billing / payments
+
+Every shop starts on a **7-day trial**, then needs a **Rs. 500/month**
+renewal. There is no true auto-recurring subscription — the Owner clicks
+**Renew** and pays a one-off charge that extends their access 30 days.
+Card/wallet details are entered on the gateway's own hosted checkout page
+and never touch this app.
+
+**Gateway: Rapid Gateway** (rapidgateway.pk) — chosen because it bundles
+JazzCash + Easypaisa + cards behind one merchant account and one API, so
+you don't need separate agreements with each wallet. Published pricing is
+a flat 2% MDR on wallet payments, no setup fee, T+1 settlement to your
+bank, and same-day sandbox keys.
+
+### Setup steps
+
+1. Call **+92 315 4020909** or go to rapidgateway.pk/contact — a 15-minute
+   KYC call. As a sole proprietor you'll need your **CNIC** and **bank
+   account details**; a registered company needs NTN + incorporation
+   certificate instead.
+2. Sandbox credentials arrive the same day, before KYC is even fully
+   verified — you can build against them immediately.
+3. Test with their sandbox phone numbers: `+92 300 0000001` always
+   succeeds, `+92 300 0000002` always fails (use it to test your error
+   handling).
+4. Once KYC clears (usually within the hour), swap sandbox keys for live
+   keys — no code changes needed.
+
+### Deploying the two Edge Functions (in `../edge-functions/`)
+
+- **`create-payment`** — called when the Owner clicks Renew. Creates a
+  Rapid Gateway payment intent and returns a hosted checkout URL.
+- **`payment-webhook`** — called by Rapid Gateway after payment.
+  Verifies the `X-RG-Signature` HMAC, then extends the shop's paid period
+  via the `record_payment_success` database function.
+
+```
+supabase functions deploy create-payment
+supabase functions deploy payment-webhook --no-verify-jwt
+supabase secrets set RG_SECRET_KEY=... RG_WEBHOOK_SECRET=...
+```
+
+Before deploying, edit the placeholder URLs at the top of
+`create-payment/index.ts` (`FRONTEND_RETURN_URL`, `WEBHOOK_URL`) to your
+real GitHub Pages URL and Supabase project ref.
+
+Run `003_billing.sql` (after `schema.sql` and `002_frontend_support.sql`)
+to add trial tracking and the billing gate before deploying any of this.
+
+**Note on field names**: the request/response shape in both functions
+follows Rapid Gateway's public developer guide as of mid-2026. Cross-check
+it against the actual API reference that ships with your sandbox kit —
+docs pages can drift slightly from the live spec — before switching to
+production traffic.
+
 ## Notes
 
 - Cost price is only ever queried by Owners against the `inventory` table.
